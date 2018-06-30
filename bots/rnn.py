@@ -14,6 +14,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+eos_marker = "<EOS>"
+bos_marker = "<BOS>" #for beginning
+
 class LinearSoftmaxLSTM(LSTM):
     '''
     LSTM with additional linear + softmax layers.
@@ -27,6 +30,7 @@ class LinearSoftmaxLSTM(LSTM):
         #linear layer to get output to output_size
         self.linear = nn.Linear(self.hidden_size, self.output_size)
         self.softmax = nn.LogSoftmax(dim=1)
+        self.loss = nn.NLLLoss()
 
     def forward(self, *args, **kwargs):
         '''
@@ -39,6 +43,40 @@ class LinearSoftmaxLSTM(LSTM):
 
         return output, hidden
 
+    def train(self, inputs_onehot, outputs_onehot, num_data, plot_loc=None, niters=100000):
+        all_losses = []
+
+        update_every = 10
+
+        plot_every = 1000
+
+        current_loss = 0
+
+        with trange(1, niters, desc='Loss: ' , leave=True) as t:
+            for iter in t:
+                batch_input, batch_output = random_batch(inputs_onehot, outputs_onehot, num_data)
+                output, loss = train_step(self, batch_input, batch_output)
+                current_loss += loss
+                #TODO: change update frequency
+                if iter % update_every == 0:
+                    t.set_description('Loss: {}'.format(loss))
+
+                # Add current loss avg to list of losses
+                if iter % plot_every == 0:
+                    all_losses.append(current_loss / plot_every)
+                    current_loss = 0
+
+        if plot_loc:
+            plt.figure()
+            plt.plot(all_losses)
+            plt.title("training loss")
+            plt.xlabel("1000 iterations")
+            plt.ylabel("log-loss")
+            plt.savefig(plot_loc)
+
+    def save(self, out):
+        print("Saving model to {}".format(out))
+        torch.save(self.state_dict(), out)
 
 def load_data(datafile):
     '''
@@ -48,7 +86,7 @@ def load_data(datafile):
     '''
     data_list=[]
 
-    with open(data, 'r') as f:
+    with open(datafile, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
             data_list.append(row)
@@ -58,7 +96,7 @@ def load_data(datafile):
 
     return descriptions
 
-def generate_pairs(descriptions, num_chars, eos_marker):
+def generate_pairs(descriptions, num_chars, eos_marker, bos_marker):
     '''
     Input: list of strings, number of characters in input
     output: two lists; lists of chars of length num_chars and the following string
@@ -67,25 +105,27 @@ def generate_pairs(descriptions, num_chars, eos_marker):
     #get all sets of N_CHARS + 1 letters
     inputs = []
     outputs = []
-    for desc in tqdm(descriptions):
-        for i in range(len(desc) - NUM_CHARS):
+    for desc in tqdm(descriptions, desc="Generating Data Pairs"):
+        #handling BOS char
+        for i in range(len(desc) + 1 - num_chars):
 
-            desc_list = list(desc)
-            input_letters = desc_list[i:i + NUM_CHARS]
+            desc_list = [bos_marker] + list(desc)
+
+            input_letters = desc_list[i:i + num_chars]
             inputs.append(input_letters)
 
-            if i + NUM_CHARS + 1 == len(desc):
+            if i + num_chars + 1 == len(desc) + 1:
                 #i.e. contains EOS character
                 output_letter = eos_marker
             else:
-                output_letter = desc_list[i + NUM_CHARS + 1]
+                output_letter = desc_list[i + num_chars + 1]
 
             outputs.append(output_letter)
 
     return inputs, outputs
 
 
-def tokenize(inputs, outputs, vocab):
+def tokenize(inputs, outputs, num_chars, vocab):
     '''
     Input: list of list of chars, list of chars
     Output: tokenized one-hot tensors for input and output
@@ -95,8 +135,8 @@ def tokenize(inputs, outputs, vocab):
     num_data = len(inputs)
     n_letters = len(vocab)
 
-    inputs_onehot = torch.zeros(num_data, NUM_CHARS, n_letters)
-    output_onehot = torch.zeros(num_data, n_letters).long()
+    inputs_onehot = torch.zeros(num_data, num_chars, n_letters).cuda()
+    output_onehot = torch.zeros(num_data, n_letters).long().cuda()
 
     for i in range(len(inputs[0])):
         #computing corresponding one-hot value
@@ -130,14 +170,14 @@ def random_batch(input, output, num_data, batch_size=10):
 
 def train_step(rnn, input_batch, true_output_batch, learning_rate=0.005):
     '''
-    Performs one training step of the network.
+    Performs one training step of the provided network.
     '''
 
     rnn.zero_grad()
 
     output, hidden = rnn(input_batch)
 
-    loss = criterion(output, true_output_batch)
+    loss = rnn.loss(output, true_output_batch)
     loss.backward()
 
     # Add parameters' gradients to their values, multiplied by learning rate
@@ -146,55 +186,67 @@ def train_step(rnn, input_batch, true_output_batch, learning_rate=0.005):
 
     return output, loss.item()
 
+def sample(rnn, vocab, num_chars, n_letters, eos_marker="<EOS>"):
+
+    last_char = ""
+    chars = []
+
+    #initialize input batch
+    inputs_onehot = torch.zeros(1, num_chars, n_letters).cuda()
+    inputs_onehot[:,:,-1] = 1 #all to BOS tokens
+
+    while last_char != eos_marker:
+        output, _ = rnn(inputs_onehot)
+
+        last_char = letter_from_output(output, vocab)
+
+        #update inputs_onehot
+
+def train_and_save(data, num_chars, rnn_loc, n_iters=100000):
+    '''
+    Trains and saves the RNN.
+    '''
+
+    with torch.cuda.device(0):
+
+        eos_marker = "<EOS>"
+        bos_marker = "<BOS>" #for beginning
+
+        all_letters = string.ascii_letters + " .,;'-" + eos_marker + bos_marker
+        n_letters = len(all_letters) # Plus EOS marker
+
+        descriptions = load_data(data)
+
+        inputs, outputs = generate_pairs(descriptions, num_chars, eos_marker, bos_marker)
+
+        num_data = len(inputs)
+
+        inputs_onehot, outputs_onehot = tokenize(inputs, outputs, num_chars, all_letters)
+
+        #initializing RNN
+        #NOTE: in this case, input and output are the same size - not always going to be the case
+        hidden_size=256
+        rnn = LinearSoftmaxLSTM(n_letters, n_letters, hidden_size, batch_first=True)
+        rnn.cuda()
+        #loss function
+        loss_fn = nn.NLLLoss()
+        rnn.train(inputs_onehot, outputs_onehot, num_data, plot_loc="train_loss.png")
+        #saves model
+        rnn.save(rnn_loc)
+
+
 
 if __name__=="__main__":
-    NUM_CHARS = 3
-    N_ITERS = 10000
 
-    data = "../data/starthub.csv"
-    eos_marker = "<EOS>"
+    train = True
+    num_chars = 3
+    rnn_loc = "../models/rnn_test"
 
-    all_letters = string.ascii_letters + " .,;'-" + eos_marker
-    n_letters = len(all_letters) # Plus EOS marker
+    if train:
+        train_and_save("../data/starthub.csv", num_chars, rnn_loc)
+    else:
 
-    descriptions = load_data(data)
+        rnn = torch.load(rnn_loc)
 
-    inputs, outputs = generate_pairs(descriptions, NUM_CHARS, eos_marker)
-
-    num_data = len(inputs)
-
-    inputs_onehot, outputs_onehot = tokenize(inputs, outputs, all_letters)
-
-    #initializing RNN
-    #NOTE: in this case, input and output are the same size - not always going to be the case
-    hidden_size=256
-    rnn = LinearSoftmaxLSTM(n_letters, n_letters, hidden_size, batch_first=True)
-    #loss
-    criterion = nn.NLLLoss()
-
-    all_losses = []
-
-    plot_every = 1000
-
-    current_loss = 0
-
-    with trange(1, N_ITERS) as t:
-        for iter in trange(1, N_ITERS):
-            batch_input, batch_output = random_batch(inputs_onehot, outputs_onehot, num_data)
-            output, loss = train_step(rnn, batch_input, batch_output)
-            current_loss += loss
-            #TODO: change update frequency
-            t.set_description('Loss: {}'.format(loss))
-
-            # Add current loss avg to list of losses
-            if iter % plot_every == 0:
-                all_losses.append(current_loss / plot_every)
-                current_loss = 0
-
-
-    plt.figure()
-    plt.plot(all_losses)
-    plt.title("training loss")
-    plt.xlabel("1000 iterations")
-    plt.ylabel("log-loss")
-    plt.savefig("train_loss.png")
+        # num_samples = 10
+        # for i in range(num_samples):
