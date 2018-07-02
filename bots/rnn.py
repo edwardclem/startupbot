@@ -37,15 +37,20 @@ class LinearSoftmaxLSTM(LSTM):
         Appending the additional layers.
         '''
         #using the hidden state at the last iteration
-        output, hidden = super(LinearSoftmaxLSTM, self).forward(*args, **kwargs)
+        output, hidden_cell = super(LinearSoftmaxLSTM, self).forward(*args, **kwargs)
 
-        #extracting final array, reshaping to batch first
-        final_hidden = torch.transpose(hidden[-1], 0, 1)
+
+        hidden, cell = hidden_cell
+        # print(hidden.size())
+
+        #transposing array for Linear operation
+        final_hidden = torch.transpose(hidden, 1, 0)
+        # print(final_hidden.size())
 
         linear = self.linear(final_hidden)
         output = self.softmax(linear)
 
-        return output, hidden
+        return output, hidden_cell
 
     def train(self, inputs_onehot, outputs_onehot, num_data, plot_loc=None, niters=100000):
         all_losses = []
@@ -181,6 +186,7 @@ def train_step(rnn, input_batch, true_output_batch, learning_rate=0.005):
     rnn.zero_grad()
 
     output, hidden = rnn(input_batch)
+    print(output)
 
     loss = rnn.loss(output, true_output_batch)
     loss.backward()
@@ -239,8 +245,6 @@ def train_and_save(data, num_chars, vocab, rnn_loc, eos_marker = "<EOS>", bos_ma
     num_data = len(inputs)
 
     inputs_onehot, outputs_onehot = tokenize(inputs, outputs, num_chars, vocab)
-
-    print(len(vocab))
 
     #initializing RNN
     #NOTE: in this case, input and output are the same size - not always going to be the case
