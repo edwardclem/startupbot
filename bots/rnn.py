@@ -36,9 +36,13 @@ class LinearSoftmaxLSTM(LSTM):
         '''
         Appending the additional layers.
         '''
-        output_hidden, hidden = super(LinearSoftmaxLSTM, self).forward(*args, **kwargs)
+        #using the hidden state at the last iteration
+        output, hidden = super(LinearSoftmaxLSTM, self).forward(*args, **kwargs)
 
-        linear = self.linear(output_hidden)
+        #extracting final array, reshaping to batch first
+        final_hidden = torch.transpose(hidden[-1], 0, 1)
+
+        linear = self.linear(final_hidden)
         output = self.softmax(linear)
 
         return output, hidden
@@ -135,16 +139,16 @@ def tokenize(inputs, outputs, num_chars, vocab):
     num_data = len(inputs)
     n_letters = len(vocab)
 
-    inputs_onehot = torch.zeros(num_data, num_chars, n_letters).cuda()
-    output_onehot = torch.zeros(num_data, n_letters).long().cuda()
+    inputs_onehot = torch.zeros(num_data, num_chars, n_letters)
+    output_onehot = torch.zeros(num_data, n_letters).long()
 
     for i in range(len(inputs[0])):
         #computing corresponding one-hot value
         for j, letter in enumerate(inputs[i]):
-            letter_index = vocab.find(letter)
+            letter_index = vocab.index(letter)
             inputs_onehot[i, j, letter_index] = 1
 
-        output_index = vocab.find(outputs[i])
+        output_index = vocab.index(outputs[i])
         output_onehot[i, output_index] = 1
 
     return inputs_onehot, output_onehot
@@ -152,10 +156,11 @@ def tokenize(inputs, outputs, num_chars, vocab):
 def letter_from_output(output, vocab):
     '''
     Helper function generating letters from output.
+    TODO: FIX THIS
     '''
     top_n, top_i = output.topk(1)
-    category_i = top_i[0].item()
-    return vocab[category_i], category_i
+    index_i = top_i[0][-1].item()
+    return vocab[index_i], index_i
 
 def random_batch(input, output, num_data, batch_size=10):
     '''
@@ -186,53 +191,67 @@ def train_step(rnn, input_batch, true_output_batch, learning_rate=0.005):
 
     return output, loss.item()
 
-def sample(rnn, vocab, num_chars, n_letters, eos_marker="<EOS>"):
+def sample(rnn, vocab, num_chars, n_letters, max_length = 256, eos_marker="<EOS>"):
+
 
     last_char = ""
     chars = []
 
     #initialize input batch
     inputs_onehot = torch.zeros(1, num_chars, n_letters).cuda()
-    inputs_onehot[:,:,-1] = 1 #all to BOS tokens
+    inputs_onehot[:,0:(n_letters - 2),-1] = 1 #most set to bos tokens
 
-    while last_char != eos_marker:
+    #set most recent to a random letter
+
+    random_char = np.random.randint(0, n_letters)
+
+    inputs_onehot[:,-1,random_char] = 1
+    print(inputs_onehot)
+
+    seq_len = 0
+    while last_char != eos_marker and seq_len < max_length:
         output, _ = rnn(inputs_onehot)
 
-        last_char = letter_from_output(output, vocab)
+        last_char, char_index = letter_from_output(output, vocab)
+
+        chars.append(last_char)
 
         #update inputs_onehot
+        inputs_onehot_new = torch.zeros(1, num_chars, n_letters).cuda()
 
-def train_and_save(data, num_chars, rnn_loc, n_iters=100000):
+        inputs_onehot_new[:,0:(num_chars - 1),:] = inputs_onehot[:,1:num_chars,:]
+        inputs_onehot[:, -1, char_index] = 1
+        seq_len += 1
+
+    print("".join(chars))
+
+def train_and_save(data, num_chars, vocab, rnn_loc, eos_marker = "<EOS>", bos_marker = "<BOS>", hidden_size=256, n_iters=100000):
     '''
     Trains and saves the RNN.
     '''
 
-    with torch.cuda.device(0):
+    # with torch.cuda.device(0):
 
-        eos_marker = "<EOS>"
-        bos_marker = "<BOS>" #for beginning
+    descriptions = load_data(data)
 
-        all_letters = string.ascii_letters + " .,;'-" + eos_marker + bos_marker
-        n_letters = len(all_letters) # Plus EOS marker
+    inputs, outputs = generate_pairs(descriptions, num_chars, eos_marker, bos_marker)
 
-        descriptions = load_data(data)
+    num_data = len(inputs)
 
-        inputs, outputs = generate_pairs(descriptions, num_chars, eos_marker, bos_marker)
+    inputs_onehot, outputs_onehot = tokenize(inputs, outputs, num_chars, vocab)
 
-        num_data = len(inputs)
+    print(len(vocab))
 
-        inputs_onehot, outputs_onehot = tokenize(inputs, outputs, num_chars, all_letters)
+    #initializing RNN
+    #NOTE: in this case, input and output are the same size - not always going to be the case
 
-        #initializing RNN
-        #NOTE: in this case, input and output are the same size - not always going to be the case
-        hidden_size=256
-        rnn = LinearSoftmaxLSTM(n_letters, n_letters, hidden_size, batch_first=True)
-        rnn.cuda()
-        #loss function
-        loss_fn = nn.NLLLoss()
-        rnn.train(inputs_onehot, outputs_onehot, num_data, plot_loc="train_loss.png")
-        #saves model
-        rnn.save(rnn_loc)
+    rnn = LinearSoftmaxLSTM(n_letters, n_letters, hidden_size, batch_first=True)
+    # rnn.cuda()
+    #loss function
+    loss_fn = nn.NLLLoss()
+    rnn.train(inputs_onehot, outputs_onehot, num_data, plot_loc="train_loss.png")
+    #saves model
+    rnn.save(rnn_loc)
 
 
 
@@ -241,12 +260,19 @@ if __name__=="__main__":
     train = True
     num_chars = 3
     rnn_loc = "../models/rnn_test"
+    eos_marker = "<EOS>"
+    bos_marker = "<BOS>"
+    hidden_size = 256
+
+    all_letters = list(string.ascii_letters + " .,;'-") + [eos_marker, bos_marker]
+    n_letters = len(all_letters) # Plus EOS marker
 
     if train:
-        train_and_save("../data/starthub.csv", num_chars, rnn_loc)
+        train_and_save("../data/starthub.csv", num_chars, all_letters,rnn_loc)
     else:
+        with torch.cuda.device(0):
+            rnn = LinearSoftmaxLSTM(n_letters, n_letters, hidden_size, batch_first=True)
+            rnn.cuda()
+            rnn.load_state_dict(torch.load(rnn_loc))
 
-        rnn = torch.load(rnn_loc)
-
-        # num_samples = 10
-        # for i in range(num_samples):
+            sample(rnn, all_letters, num_chars, n_letters)
