@@ -27,8 +27,10 @@ for i in trange(1, NUM_PAGES):
     #converting to dict for easy CSV parsing
     for company in companies:
         name = company.find("a", attrs={"class":"dark"}).text.strip()
-        description = company.find("p").text.strip()
-        company_list.append({"name":name, "description":description})
+        description = company.find("p").text.strip().replace("\n", " ").lower()
+
+        if len(description) > 0:
+            company_list.append({"name":name, "description":description})
 
 #saving files
 with open(outfile, "w") as f:
